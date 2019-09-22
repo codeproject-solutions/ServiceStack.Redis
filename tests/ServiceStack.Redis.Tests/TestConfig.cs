@@ -1,41 +1,43 @@
+using System;
 using ServiceStack.Logging;
 using ServiceStack.Support;
 
 namespace ServiceStack.Redis.Tests
 {
-	public static class TestConfig
-	{
-		static TestConfig()
-		{
-			LogManager.LogFactory = new InMemoryLogFactory();
-		}
+    public static class TestConfig
+    {
+        static TestConfig()
+        {
+            LogManager.LogFactory = new InMemoryLogFactory();
+        }
 
-		public const bool IgnoreLongTests = true;
+        public static bool IgnoreLongTests = true;
 
-        public const string SingleHost = "localhost";
-        public const string MasterName = "mymaster";
+        public static string SingleHost => Environment.GetEnvironmentVariable("CI_REDIS") ?? "localhost";
+
+        public static string GeoHost => Environment.GetEnvironmentVariable("CI_REDIS") ?? "10.0.0.121";
+
         public static readonly string[] MasterHosts = new[] { "localhost" };
         public static readonly string[] SlaveHosts = new[] { "localhost" };
 
-	    public const int RedisPort = 6379;
-	    public const int RedisSentinelPort = 26379;
+        public const int RedisPort = 6379;
 
-		public static string SingleHostConnectionString
-		{
-			get
-			{
-				return SingleHost + ":" + RedisPort;
-			}
-		}
+        public static string SingleHostConnectionString
+        {
+            get
+            {
+                return SingleHost + ":" + RedisPort;
+            }
+        }
 
-		public static BasicRedisClientManager BasicClientManger
-		{
-			get
-			{
-				return new BasicRedisClientManager(new[] {
-					SingleHostConnectionString
-				});
-			}
-		}
-	}
+        public static BasicRedisClientManager BasicClientManger
+        {
+            get
+            {
+                return new BasicRedisClientManager(new[] {
+                    SingleHostConnectionString
+                });
+            }
+        }
+    }
 }

@@ -1,3 +1,4 @@
+using System;
 using ServiceStack.Text;
 
 namespace ServiceStack.Redis
@@ -30,6 +31,7 @@ namespace ServiceStack.Redis
         public readonly static byte[] BgSave = "BGSAVE".ToUtf8Bytes();
         public readonly static byte[] LastSave = "LASTSAVE".ToUtf8Bytes();
         public readonly static byte[] Shutdown = "SHUTDOWN".ToUtf8Bytes();
+        public readonly static byte[] NoSave = "NOSAVE".ToUtf8Bytes();
         public readonly static byte[] BgRewriteAof = "BGREWRITEAOF".ToUtf8Bytes();
 
         public readonly static byte[] Info = "INFO".ToUtf8Bytes();
@@ -37,8 +39,10 @@ namespace ServiceStack.Redis
         public readonly static byte[] No = "NO".ToUtf8Bytes();
         public readonly static byte[] One = "ONE".ToUtf8Bytes();
         public readonly static byte[] ResetStat = "RESETSTAT".ToUtf8Bytes();
+        public readonly static byte[] Rewrite = "REWRITE".ToUtf8Bytes();
         public readonly static byte[] Time = "TIME".ToUtf8Bytes();
         public readonly static byte[] Segfault = "SEGFAULT".ToUtf8Bytes();
+        public readonly static byte[] Sleep = "SLEEP".ToUtf8Bytes();
         public readonly static byte[] Dump = "DUMP".ToUtf8Bytes();
         public readonly static byte[] Restore = "RESTORE".ToUtf8Bytes();
         public readonly static byte[] Migrate = "MIGRATE".ToUtf8Bytes();
@@ -51,8 +55,13 @@ namespace ServiceStack.Redis
         public readonly static byte[] Client = "CLIENT".ToUtf8Bytes();
         public readonly static byte[] List = "LIST".ToUtf8Bytes();
         public readonly static byte[] Kill = "KILL".ToUtf8Bytes();
+        public readonly static byte[] Addr = "ADDR".ToUtf8Bytes();
+        public readonly static byte[] Id = "ID".ToUtf8Bytes();
+        public readonly static byte[] SkipMe = "SKIPME".ToUtf8Bytes();
         public readonly static byte[] SetName = "SETNAME".ToUtf8Bytes();
         public readonly static byte[] GetName = "GETNAME".ToUtf8Bytes();
+        public readonly static byte[] Pause = "PAUSE".ToUtf8Bytes();
+        public readonly static byte[] Role = "ROLE".ToUtf8Bytes();
         //public readonly static byte[] Get = "GET".ToUtf8Bytes();
         //public readonly static byte[] Set = "SET".ToUtf8Bytes();
 
@@ -197,5 +206,48 @@ namespace ServiceStack.Redis
 
         // Sentinel commands
         public readonly static byte[] Sentinel = "SENTINEL".ToUtf8Bytes();
+        public readonly static byte[] Masters = "masters".ToUtf8Bytes();
+        public readonly static byte[] Sentinels = "sentinels".ToUtf8Bytes();
+        public readonly static byte[] Master = "master".ToUtf8Bytes();
+        public readonly static byte[] Slaves = "slaves".ToUtf8Bytes();
+        public readonly static byte[] Failover = "failover".ToUtf8Bytes();
+        public readonly static byte[] GetMasterAddrByName = "get-master-addr-by-name".ToUtf8Bytes();
+
+        //Geo commands
+        public readonly static byte[] GeoAdd = "GEOADD".ToUtf8Bytes();
+        public readonly static byte[] GeoDist = "GEODIST".ToUtf8Bytes();
+        public readonly static byte[] GeoHash = "GEOHASH".ToUtf8Bytes();
+        public readonly static byte[] GeoPos = "GEOPOS".ToUtf8Bytes();
+        public readonly static byte[] GeoRadius = "GEORADIUS".ToUtf8Bytes();
+        public readonly static byte[] GeoRadiusByMember = "GEORADIUSBYMEMBER".ToUtf8Bytes();
+
+        public readonly static byte[] WithCoord = "WITHCOORD".ToUtf8Bytes();
+        public readonly static byte[] WithDist = "WITHDIST".ToUtf8Bytes();
+        public readonly static byte[] WithHash = "WITHHASH".ToUtf8Bytes();
+
+        public readonly static byte[] Meters = RedisGeoUnit.Meters.ToUtf8Bytes();
+        public readonly static byte[] Kilometers = RedisGeoUnit.Kilometers.ToUtf8Bytes();
+        public readonly static byte[] Miles = RedisGeoUnit.Miles.ToUtf8Bytes();
+        public readonly static byte[] Feet = RedisGeoUnit.Feet.ToUtf8Bytes();
+
+        public static byte[] GetUnit(string unit)
+        {
+            if (unit == null)
+                throw new ArgumentNullException("unit");
+
+            switch (unit)
+            {
+                case RedisGeoUnit.Meters:
+                    return Meters;
+                case RedisGeoUnit.Kilometers:
+                    return Kilometers;
+                case RedisGeoUnit.Miles:
+                    return Miles;
+                case RedisGeoUnit.Feet:
+                    return Feet;
+                default:
+                    throw new NotSupportedException("Unit '{0}' is not a valid unit".Fmt(unit));
+            }
+        }
     }
 }

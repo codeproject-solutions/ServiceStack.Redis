@@ -34,9 +34,18 @@ obj/
 _ReSharper*/
 [Tt]est[Rr]esult*
 App_Data/
+.vs/
+.vscode/
+*.lock.json
+*.nuget.props
+*.nuget.targets
 
 NuGet/
 NuGet.Signed/
-*.pfx
+packages/
 
 build/
+tests/ServiceStack.Redis.Tests/azureconfig.txt
+*.rdb
+*.dat
+*.rdb

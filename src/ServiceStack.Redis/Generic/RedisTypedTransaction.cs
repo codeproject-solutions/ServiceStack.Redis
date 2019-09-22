@@ -16,18 +16,18 @@ using ServiceStack.Redis.Pipeline;
 
 namespace ServiceStack.Redis.Generic
 {
-	/// <summary>
-	/// Adds support for Redis Transactions (i.e. MULTI/EXEC/DISCARD operations).
-	/// </summary>
-	internal class RedisTypedTransaction<T>
-		: RedisTypedPipeline<T>, IRedisTypedTransaction<T>, IRedisTransactionBase
-	{
-	    private int _numCommands = 0;
-		internal RedisTypedTransaction(RedisTypedClient<T> redisClient)
-			: base(redisClient)
-		{
-		 
-		}
+    /// <summary>
+    /// Adds support for Redis Transactions (i.e. MULTI/EXEC/DISCARD operations).
+    /// </summary>
+    internal class RedisTypedTransaction<T>
+        : RedisTypedPipeline<T>, IRedisTypedTransaction<T>, IRedisTransactionBase
+    {
+        private int _numCommands = 0;
+        internal RedisTypedTransaction(RedisTypedClient<T> redisClient)
+            : base(redisClient)
+        {
+
+        }
 
         protected override void Init()
         {
@@ -120,10 +120,9 @@ namespace ServiceStack.Redis.Generic
         private void handleMultiDataResultCount(int count)
         {
             if (count != _numCommands)
-                throw new InvalidOperationException(string.Format(
-                    "Invalid results received from 'EXEC', expected '{0}' received '{1}'"
-                    + "\nWarning: Transaction was committed",
-                    _numCommands, count));
+                throw new InvalidOperationException(
+                    $"Invalid results received from 'EXEC', expected '{_numCommands}' received '{count}'" +
+                    "\nWarning: Transaction was committed");
         }
 
         public void Rollback()
@@ -135,7 +134,7 @@ namespace ServiceStack.Redis.Generic
             RedisClient.ClearTypeIdsRegisteredDuringPipeline();
         }
 
-        public bool Replay()
+        public override bool Replay()
         {
             bool rc = true;
             try
@@ -163,7 +162,7 @@ namespace ServiceStack.Redis.Generic
             return rc;
         }
 
-        public void Dispose()
+        public override void Dispose()
         {
             base.Dispose();
             if (RedisClient.Transaction == null) return;

@@ -125,7 +125,7 @@ namespace ServiceStack.Redis.Tests
             }
             catch (RedisResponseException ex)
             {
-                Assert.That(ex.Message, Is.StringContaining("NOSCRIPT"));
+                Assert.That(ex.Message, Does.Contain("NOSCRIPT"));
             }
         }
 
@@ -183,7 +183,7 @@ namespace ServiceStack.Redis.Tests
         [Test]
         public void Can_return_DaysOfWeek_as_list()
         {
-            Enum.GetNames(typeof (DayOfWeek)).ToList()
+            Enum.GetNames(typeof(DayOfWeek)).ToList()
                 .ForEach(x => Redis.AddItemToList("DaysOfWeek", x));
             Redis.ExecLuaAsList("return redis.call('LRANGE', 'DaysOfWeek', 0, -1)").PrintDump();
         }

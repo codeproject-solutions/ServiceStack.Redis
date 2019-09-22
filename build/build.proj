@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Default"
-    xmlns='http://schemas.microsoft.com/developer/msbuild/2003' ToolsVersion="4.0">
+         xmlns='http://schemas.microsoft.com/developer/msbuild/2003' ToolsVersion="4.0">
   <Import Project="$(MSBuildProjectDirectory)/build.tasks" />
 
   <PropertyGroup>
-    <MajorVersion Condition="$(MajorVersion) == ''">4</MajorVersion>
+    <MajorVersion Condition="$(MajorVersion) == ''">5</MajorVersion>
     <MinorVersion Condition="$(MinorVersion) == ''">0</MinorVersion>
     <PatchVersion Condition="$(PatchVersion) == ''">$(BUILD_NUMBER)</PatchVersion>
   </PropertyGroup>
@@ -13,18 +13,9 @@
     <BuildSolutionDir>$(MSBuildProjectDirectory)/..</BuildSolutionDir>
     <SrcDir>$(BuildSolutionDir)/src</SrcDir>
     <Configuration Condition="$(Configuration) == ''">Release</Configuration>
-    <NuGetPath>$(BuildSolutionDir)/src/.nuget/nuget.exe</NuGetPath>
     <NuGetPackageDir>$(BuildSolutionDir)/NuGet/</NuGetPackageDir>
-    <Version>$(MajorVersion).$(MinorVersion).$(PatchVersion).0</Version>
-    <UnstableTag Condition="$(RELEASE) == ''">-unstable</UnstableTag>
-    <PackageVersion>$(MajorVersion).$(MinorVersion).$(PatchVersion)$(UnstableTag)</PackageVersion>
+    <PackageVersion>$(MajorVersion).$(MinorVersion).$(PatchVersion)</PackageVersion>
   </PropertyGroup>
-
-
-  <ItemGroup>
-      <NugetPackageFilesToDelete Include="$(NuGetPackageDir)/*.nupkg"/>
-  </ItemGroup>
-
 
   <PropertyGroup>
     <DoBuildSolutionsDependsOn>
@@ -33,74 +24,51 @@
     </DoBuildSolutionsDependsOn>
   </PropertyGroup>
 
-  <Target Name="Default" DependsOnTargets="$(DoBuildSolutionsDependsOn)" />
-
-  <Target Name="TeamCityBuild">
-    <!--<Copy SourceFiles="$(BuildSolutionDir)/tests/ServiceStack.Common.Tests/ci.app.config" DestinationFiles="$(BuildSolutionDir)/tests/ServiceStack.Common.Tests/app.config" />-->
-    <CallTarget Targets="Default" />
-  </Target>
-
-  <Target Name="UnitTestsWithoutIntegration" DependsOnTargets="$(DoBuildSolutionsDependsOn)">
-      <Exec Command="$(BuildSolutionDir)/lib/tests/nunit-console-x86.exe /exclude:Integration $(BuildSolutionDir)/tests/ServiceStack.Redis.Tests/bin/Debug/ServiceStack.Redis.Tests.dll"/>
-  </Target>
-
-  <Target Name="UnitTests" DependsOnTargets="$(DoBuildSolutionsDependsOn)">
-      <Exec Command="$(BuildSolutionDir)/lib/tests/nunit-console-x86.exe $(BuildSolutionDir)/tests/ServiceStack.Redis.Tests/bin/Debug/ServiceStack.Redis.Tests.dll"/>
-  </Target>
-
   <Target Name="BeforeBuildSolutions">
     <Message Text="*****Before building solution*****" Importance="high"/>
-    <!--<Copy SourceFiles="Test/ci.app.config" DestinationFiles="Test/app.config" />-->
+    <CallTarget Targets="UpdateVersion" />
   </Target>
 
   <Target Name="BuildSolutions">
+    <CallTarget Targets="ClearNuGetRestoreCaches" />
+    <MSBuild Projects="$(BuildSolutionDir)/src/ServiceStack.Redis.sln" Targets="Restore" />
     <MSBuild Projects="$(BuildSolutionDir)/src/ServiceStack.Redis.sln" Targets="Build"
-   Properties="Configuration=$(Configuration)" />
+             Properties="Configuration=$(Configuration)" />
+  </Target>
+
+  <!-- need to remove old caches from nuget restore from .Core csproj's -->
+  <Target Name="ClearNuGetRestoreCaches">
+    <RemoveDir Directories="$(SrcDir)/ServiceStack.Redis/obj" />
   </Target>
 
   <Target Name="UpdateVersion">
+    <!-- Update Version -->
     <ItemGroup>
-      <RegexTransform Include="$(SrcDir)/**/AssemblyInfo.cs">
-        <Find>AssemblyFileVersion\(\"\d+\.\d+\.\d+\.\d+\"\)</Find>
-        <ReplaceWith>AssemblyFileVersion("$(Version)")</ReplaceWith>
-      </RegexTransform>
-      <RegexTransform Include="$(SrcDir)/**/AssemblyInfo.cs">
-        <Find>AssemblyVersion\(\"\d+\.\d+\.\d+\.\d+\"\)</Find>
-        <ReplaceWith>AssemblyVersion("$(Version)")</ReplaceWith>
-      </RegexTransform>
-      <RegexTransform Include="$(BuildSolutionDir)/tests/**/*.config">
-        <Find>key="servicestack:license".*</Find>
-        <ReplaceWith>key="servicestack:license" value="$([System.IO.File]::ReadAllText($(MSBuildProjectDirectory)/appsettings.license.txt))" /&gt;</ReplaceWith>
-      </RegexTransform>
-      <!--Update Min Dependency Version -->
-      <RegexTransform Include="$(NuGetPackageDir)/**/*.nuspec">
-        <Find>version="4\.0[^"]*"</Find>
-        <ReplaceWith>version="$(PackageVersion)"</ReplaceWith>
+      <RegexTransform Include="$(BuildSolutionDir)/src/Directory.Build.props;$(BuildSolutionDir)/tests/Directory.Build.props">
+        <Find>&lt;Version&gt;[^&lt;]*</Find>
+        <ReplaceWith>&lt;Version&gt;$(PackageVersion)</ReplaceWith>
       </RegexTransform>
     </ItemGroup>
 
     <RegexTransform Items="@(RegexTransform)" />
   </Target>
 
-  <Target Name="NuGetPack">
+  <Target Name="Default" DependsOnTargets="$(DoBuildSolutionsDependsOn)">
 
-    <CallTarget Targets="UpdateVersion" />
-
-    <Delete Files="@(NugetPackageFilesToDelete)" />
-
-    <ItemGroup>
-      <RedisFiles Include="$(SrcDir)/ServiceStack.Redis/bin/$(Configuration)/ServiceStack.Redis.*"></RedisFiles>
-    </ItemGroup>
-
+    <!-- ServiceStack.Redis -->
     <MSBuild Projects="$(BuildSolutionDir)/src/ServiceStack.Redis/ServiceStack.Redis.csproj"
-             Targets="Build"
-             Properties="Version=$(PackageVersion);Configuration=$(Configuration)" />
- 
-    <MakeDir Directories="$(NuGetPackageDir)/ServiceStack.Redis/lib/net40" Condition="!Exists('$(NuGetPackageDir)/ServiceStack.Redis/lib/net40')" />
-    <Copy SourceFiles="%(RedisFiles.Identity)" DestinationFolder="$(NuGetPackageDir)/ServiceStack.Redis/lib/net40" />
+             Targets="Build;Pack"
+             Properties="Configuration=$(Configuration)" />
 
-    <Exec Command="&quot;$(NuGetPath)&quot; pack &quot;$(NuGetPackageDir)/ServiceStack.Redis/servicestack.redis.nuspec&quot; -OutputDirectory &quot;$(NuGetPackageDir)&quot; -Version $(PackageVersion) -Symbols"
-            LogStandardErrorAsError="true" />
+
+    <!-- Copy all *.nupkg to /NuGet -->
+    <ItemGroup>
+      <NugetPackagesToMove Include="$(BuildSolutionDir)/src/**/bin/$(Configuration)/*.nupkg"/>
+    </ItemGroup>
+    <Move SourceFiles="@(NugetPackagesToMove)" DestinationFolder="$(NuGetPackageDir)" />
+
+    <!-- leave .sln in optimal state then NuGet restore .sln to build -->
+    <CallTarget Targets="ClearNuGetRestoreCaches" />
 
   </Target>
 </Project>

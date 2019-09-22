@@ -1,10 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using ServiceStack.Caching;
 
 namespace ServiceStack.Redis
 {
-    public class RedisClientManagerCacheClient : ICacheClient, IRemoveByPattern
+    /// <summary>
+    /// For interoperabilty GetCacheClient() and GetReadOnlyCacheClient()
+    /// return an ICacheClient wrapper around the redis manager which has the affect of calling 
+    /// GetClient() for all write operations and GetReadOnlyClient() for the read ones.
+    /// 
+    /// This works well for master-slave replication scenarios where you have 
+    /// 1 master that replicates to multiple read slaves.
+    /// </summary>
+    public class RedisClientManagerCacheClient : ICacheClient, IRemoveByPattern, ICacheClientExtended
     {
         private readonly IRedisClientsManager redisManager;
 
@@ -172,19 +181,42 @@ namespace ServiceStack.Redis
         {
             using (var client = GetClient())
             {
-                var redisClient = client as RedisClient;
-                if (redisClient != null)
+                if (client is IRemoveByPattern redisClient)
                 {
-                    List<string> keys = redisClient.Keys(pattern).ToStringList();
-                    if (keys.Count > 0)
-                        redisClient.Del(keys.ToArray());
+                    redisClient.RemoveByPattern(pattern);
                 }
             }
         }
 
         public void RemoveByRegex(string pattern)
         {
-            RemoveByPattern(pattern.Replace(".*", "*").Replace(".+", "?"));
+            using (var client = GetClient())
+            {
+                if (client is IRemoveByPattern redisClient)
+                {
+                    redisClient.RemoveByRegex(pattern);
+                }
+            }
+        }
+
+        public TimeSpan? GetTimeToLive(string key)
+        {
+            using (var client = GetClient())
+            {
+                if (client is ICacheClientExtended redisClient)
+                {
+                    return redisClient.GetTimeToLive(key);
+                }
+            }
+            return null;
+        }
+
+        public IEnumerable<string> GetKeysByPattern(string pattern)
+        {
+            using (var client = (ICacheClientExtended)GetClient())
+            {
+                return client.GetKeysByPattern(pattern).ToList();
+            }
         }
     }
 }

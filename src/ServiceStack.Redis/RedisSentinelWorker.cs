@@ -1,14 +1,7 @@
-﻿using ServiceStack;
+﻿using System.Threading;
 using ServiceStack.Logging;
-using ServiceStack.Redis;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using System.Web;
 
 namespace ServiceStack.Redis
 {
@@ -16,43 +9,30 @@ namespace ServiceStack.Redis
     {
         protected static readonly ILog Log = LogManager.GetLogger(typeof(RedisSentinelWorker));
 
-        private RedisClient sentinelClient;
-        private RedisClient sentinelPubSubClient;
-        private PooledRedisClientManager clientsManager;
-        private IRedisSubscription sentinelSubscription;
-        private string sentinelName;
-        private string host;
+        static int IdCounter = 0;
+        public int Id { get; }
 
-        public event EventHandler SentinelError;
+        private readonly object oLock = new object();
 
-        public RedisSentinelWorker(string host, string sentinelName, PooledRedisClientManager clientsManager = null)
+        private readonly RedisSentinel sentinel;
+        private readonly RedisClient sentinelClient;
+        private RedisPubSubServer sentinePubSub;
+
+        public Action<Exception> OnSentinelError;
+
+        public RedisSentinelWorker(RedisSentinel sentinel, RedisEndpoint sentinelEndpoint)
         {
-            this.sentinelName = sentinelName;
-            this.sentinelClient = new RedisClient(host);
-            this.sentinelPubSubClient = new RedisClient(host);
-            this.sentinelSubscription = this.sentinelPubSubClient.CreateSubscription();
-            this.sentinelSubscription.OnMessage = SentinelMessageReceived;
-            this.clientsManager = clientsManager;
+            this.Id = Interlocked.Increment(ref IdCounter);
+            this.sentinel = sentinel;
+            this.sentinelClient = new RedisClient(sentinelEndpoint) {
+                Db = 0, //Sentinel Servers doesn't support DB, reset to 0
+                ConnectTimeout = sentinel.SentinelWorkerConnectTimeoutMs,
+                ReceiveTimeout = sentinel.SentinelWorkerReceiveTimeoutMs,
+                SendTimeout = sentinel.SentinelWorkerSendTimeoutMs,
+            };
 
-            Log.Info("Set up Redis Sentinel on {0}".Fmt(host));
-        }
-
-        private void SubscribeForChanges(object arg)
-        {
-            try
-            {
-                // subscribe to all messages
-                this.sentinelSubscription.SubscribeToChannelsMatching("*");
-            }
-            catch (Exception)
-            {
-                Log.Error("Problem Subscribing to Redis Channel on {0}:{1}".Fmt(this.sentinelClient.Host, this.sentinelClient.Port));
-                // problem communicating to sentinel
-                if (SentinelError != null)
-                {
-                    SentinelError(this, EventArgs.Empty);
-                }
-            }
+            if (Log.IsDebugEnabled)
+                Log.Debug("Set up Redis Sentinel on {0}".Fmt(sentinelEndpoint));
         }
 
         /// <summary>
@@ -62,207 +42,167 @@ namespace ServiceStack.Redis
         /// <param name="message"></param>
         private void SentinelMessageReceived(string channel, string message)
         {
+            if (Log.IsDebugEnabled)
+                Log.Debug("Received '{0}' on channel '{1}' from Sentinel".Fmt(channel, message));
+
             // {+|-}sdown is the event for server coming up or down
-            if (channel.ToLower().Contains("sdown"))
+            var c = channel.ToLower();
+            var isSubjectivelyDown = c.Contains("sdown");
+            if (isSubjectivelyDown)
+                Interlocked.Increment(ref RedisState.TotalSubjectiveServersDown);
+
+            var isObjectivelyDown = c.Contains("odown");
+            if (isObjectivelyDown)
+                Interlocked.Increment(ref RedisState.TotalObjectiveServersDown);
+
+            if (c == "+failover-end" 
+                || c == "+switch-master"
+                || (sentinel.ResetWhenSubjectivelyDown && isSubjectivelyDown)
+                || (sentinel.ResetWhenObjectivelyDown && isObjectivelyDown))
             {
-                Log.Info("Sentinel detected server down/up with message:{0}".Fmt(message));
+                if (Log.IsDebugEnabled)
+                    Log.Debug("Sentinel detected server down/up '{0}' with message: {1}".Fmt(channel, message));
 
-                ConfigureRedisFromSentinel();
-            }
-        }
-
-        /// <summary>
-        /// Does a sentinel check for masters and slaves and either sets up or fails over to the new config
-        /// </summary>
-        private void ConfigureRedisFromSentinel()
-        {
-            Log.Info("Configuring Redis Clients");
-
-            var masters = ConvertMasterArrayToList(this.sentinelClient.Sentinel("master", this.sentinelName));
-            var slaves = ConvertSlaveArrayToList(this.sentinelClient.Sentinel("slaves", this.sentinelName));
-
-            if (this.clientsManager == null)
-            {
-                if (slaves.Count() > 0)
-                {
-                    this.clientsManager = new PooledRedisClientManager(masters, slaves);
-                }
-                else
-                {
-                    this.clientsManager = new PooledRedisClientManager(masters.ToArray());
-                }
-            }
-            else
-            {
-                if (slaves.Count() > 0)
-                {
-                    this.clientsManager.FailoverTo(masters, slaves);
-                }
-                else
-                {
-                    this.clientsManager.FailoverTo(masters.ToArray());
-                }
-            }
-        }
-
-        /// <summary>
-        /// Takes output from sentinel slaves command and converts into a list of servers
-        /// </summary>
-        /// <param name="items"></param>
-        /// <returns></returns>
-        private IEnumerable<string> ConvertSlaveArrayToList(object[] slaves)
-        {
-            var servers = new List<string>();
-            bool fetchIP = false;
-            bool fetchPort = false;
-            bool fetchFlags = false;
-            string ip = null;
-            string port = null;
-            string value = null;
-            string flags = null;
-
-            foreach (var slave in slaves.OfType<object[]>())
-            {
-                fetchIP = false;
-                fetchPort = false;
-                ip = null;
-                port = null;
-
-                foreach (var item in slave)
-                {
-                    if (item is byte[])
-                    {
-                        value = Encoding.UTF8.GetString((byte[])item);
-                        if (value == "ip")
-                        {
-                            fetchIP = true;
-                            continue;
-                        }
-                        else if (value == "port")
-                        {
-                            fetchPort = true;
-                            continue;
-                        }
-                        else if (value == "flags")
-                        {
-                            fetchFlags = true;
-                            continue;
-                        }
-                        else if (fetchIP)
-                        {
-                            ip = value;
-
-                            if (ip == "127.0.0.1")
-                            {
-                                ip = this.sentinelClient.Host;
-                            }
-                            fetchIP = false;
-                        }
-                        else if (fetchPort)
-                        {
-                            port = value;
-                            fetchPort = false;
-                        }
-                        else if (fetchFlags)
-                        {
-                            flags = value;
-                            fetchFlags = false;
-
-                            if (ip != null && port != null && !flags.Contains("s_down"))
-                            {
-                                servers.Add("{0}:{1}".Fmt(ip, port));
-                            }
-                        }
-
-
-                    }
-                }
+                sentinel.ResetClients();
             }
 
-            return servers;
+            if (sentinel.OnSentinelMessageReceived != null)
+                sentinel.OnSentinelMessageReceived(channel, message);
         }
 
-        /// <summary>
-        /// Takes output from sentinel master command and converts into a list of servers
-        /// </summary>
-        /// <param name="items"></param>
-        /// <returns></returns>
-        private IEnumerable<string> ConvertMasterArrayToList(object[] items)
+        internal SentinelInfo GetSentinelInfo()
         {
-            var servers = new List<string>();
-            bool fetchIP = false;
-            bool fetchPort = false;
-            string ip = null;
-            string port = null;
-            string value = null;
+            var masterHost = GetMasterHostInternal(sentinel.MasterName);
+            if (masterHost == null)
+                throw new RedisException("Redis Sentinel is reporting no master is available");
 
-            foreach (var item in items)
-            {
-                if (item is byte[])
-                {
-                    value = Encoding.UTF8.GetString((byte[])item);
-                    if (value == "ip")
-                    {
-                        fetchIP = true;
-                        continue;
-                    }
-                    else if (value == "port")
-                    {
-                        fetchPort = true;
-                        continue;
-                    }
-                    else if (fetchIP)
-                    {
-                        ip = value;
-                        if (ip == "127.0.0.1")
-                        {
-                            ip = this.sentinelClient.Host;
-                        }
-                        fetchIP = false;
-                    }
-                    else if (fetchPort)
-                    {
-                        port = value;
-                        fetchPort = false;
-                    }
+            var sentinelInfo = new SentinelInfo(
+                sentinel.MasterName,
+                new[] { masterHost },
+                GetSlaveHosts(sentinel.MasterName));
 
-                    if (ip != null && port != null)
-                    {
-                        servers.Add("{0}:{1}".Fmt(ip, port));
-                        break;
-                    }
-                }
-            }
-
-            return servers;
+            return sentinelInfo;
         }
 
-        public PooledRedisClientManager GetClientManager()
+        internal string GetMasterHost(string masterName)
         {
-            ConfigureRedisFromSentinel();
-
-            return this.clientsManager;
-        }
-
-        public void Dispose()
-        {
-            this.sentinelClient.Dispose();
-            this.sentinelPubSubClient.Dispose();
-
             try
             {
-                this.sentinelSubscription.Dispose();
+                return GetMasterHostInternal(masterName);
             }
-            catch (RedisException)
+            catch (Exception ex)
             {
-                // if this is getting disposed after the sentinel shuts down, this will fail
+                if (OnSentinelError != null)
+                    OnSentinelError(ex);
+
+                return null;
             }
+        }
+
+        private string GetMasterHostInternal(string masterName)
+        {
+            List<string> masterInfo;
+            lock (oLock)
+                masterInfo = sentinelClient.SentinelGetMasterAddrByName(masterName);
+
+            return masterInfo.Count > 0
+                ? SanitizeMasterConfig(masterInfo)
+                : null;
+        }
+
+        private string SanitizeMasterConfig(List<string> masterInfo)
+        {
+            var ip = masterInfo[0];
+            var port = masterInfo[1];
+
+            if (sentinel.IpAddressMap.TryGetValue(ip, out var aliasIp))
+                ip = aliasIp;
+
+            return $"{ip}:{port}";
+        }
+
+        internal List<string> GetSentinelHosts(string masterName)
+        {
+            List<Dictionary<string, string>> sentinelSentinels;
+            lock (oLock)
+                sentinelSentinels = this.sentinelClient.SentinelSentinels(sentinel.MasterName);
+
+            return SanitizeHostsConfig(sentinelSentinels);
+        }
+
+        internal List<string> GetSlaveHosts(string masterName)
+        {
+            List<Dictionary<string, string>> sentinelSlaves;
+
+            lock (oLock)
+                sentinelSlaves = sentinelClient.SentinelSlaves(sentinel.MasterName);
+
+            return SanitizeHostsConfig(sentinelSlaves);
+        }
+
+        private List<string> SanitizeHostsConfig(IEnumerable<Dictionary<string, string>> slaves)
+        {
+            var servers = new List<string>();
+            foreach (var slave in slaves)
+            {
+                slave.TryGetValue("flags", out var flags);
+                slave.TryGetValue("ip", out var ip);
+                slave.TryGetValue("port", out var port);
+
+                if (sentinel.IpAddressMap.TryGetValue(ip, out var aliasIp))
+                    ip = aliasIp;
+                else if (ip == "127.0.0.1")
+                    ip = this.sentinelClient.Host;
+
+                if (ip != null && port != null && !flags.Contains("s_down") && !flags.Contains("o_down"))
+                    servers.Add($"{ip}:{port}");
+            }
+            return servers;
         }
 
         public void BeginListeningForConfigurationChanges()
         {
-            // subscribing blocks, so put it on a different thread
-            Task.Factory.StartNew(SubscribeForChanges, TaskCreationOptions.LongRunning);
+            try
+            {
+                lock (oLock)
+                {
+                    if (this.sentinePubSub == null)
+                    {
+                        var sentinelManager = new BasicRedisClientManager(sentinel.SentinelHosts, sentinel.SentinelHosts)
+                        {
+                            //Use BasicRedisResolver which doesn't validate non-Master Sentinel instances
+                            RedisResolver = new BasicRedisResolver(sentinel.SentinelEndpoints, sentinel.SentinelEndpoints)
+                        };
+                        this.sentinePubSub = new RedisPubSubServer(sentinelManager)
+                        {
+                            HeartbeatInterval = null,
+                            IsSentinelSubscription = true,
+                            ChannelsMatching = new[] { RedisPubSubServer.AllChannelsWildCard },
+                            OnMessage = SentinelMessageReceived
+                        };
+                    }
+                }
+
+                this.sentinePubSub.Start();
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Error Subscribing to Redis Channel on {this.sentinelClient.Host}:{this.sentinelClient.Port}", ex);
+
+                if (OnSentinelError != null)
+                    OnSentinelError(ex);
+            }
+        }
+
+        public void ForceMasterFailover(string masterName)
+        {
+            lock (oLock)
+                this.sentinelClient.SentinelFailover(masterName);
+        }
+
+        public void Dispose()
+        {
+            new IDisposable[] { this.sentinelClient, sentinePubSub }.Dispose(Log);
         }
     }
 }

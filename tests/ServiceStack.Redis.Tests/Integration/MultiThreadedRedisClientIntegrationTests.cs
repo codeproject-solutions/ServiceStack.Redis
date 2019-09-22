@@ -5,101 +5,114 @@ using System.Threading;
 using NUnit.Framework;
 using ServiceStack.Common.Tests.Models;
 using ServiceStack.Text;
+#if NETCORE
+using System.Threading.Tasks;
+#endif
 
 namespace ServiceStack.Redis.Tests.Integration
 {
-	[TestFixture]
-	public class MultiThreadedRedisClientIntegrationTests
-		: IntegrationTestBase
-	{
-		private static string testData;
+    [TestFixture]
+    public class MultiThreadedRedisClientIntegrationTests
+        : IntegrationTestBase
+    {
+        private static string testData;
 
-		[TestFixtureSetUp]
-		public void onBeforeTestFixture()
-		{
-		    var results = 100.Times(x => ModelWithFieldsOfDifferentTypes.Create(x));
+        [OneTimeSetUp]
+        public void onBeforeTestFixture()
+        {
+            var results = 100.Times(x => ModelWithFieldsOfDifferentTypes.Create(x));
 
             testData = TypeSerializer.SerializeToString(results);
-		}
+        }
 
-		[Test]
-		public void Can_support_64_threads_using_the_client_simultaneously()
-		{
-			var before = Stopwatch.GetTimestamp();
+        [Test]
+        public void Can_support_64_threads_using_the_client_simultaneously()
+        {
+            var before = Stopwatch.GetTimestamp();
 
-			const int noOfConcurrentClients = 64; //WaitHandle.WaitAll limit is <= 64
+            const int noOfConcurrentClients = 64; //WaitHandle.WaitAll limit is <= 64
 
-			var clientAsyncResults = new List<IAsyncResult>();
-			using (var redisClient = new RedisClient(TestConfig.SingleHost))
-			{
-				for (var i = 0; i < noOfConcurrentClients; i++)
-				{
-					var clientNo = i;
-					var action = (Action)(() => UseClientAsync(redisClient, clientNo));
-					clientAsyncResults.Add(action.BeginInvoke(null, null));
-				}
-			}
+#if NETCORE
+            List<Task> tasks = new List<Task>();
+#else
+            var clientAsyncResults = new List<IAsyncResult>();
+#endif             
+            using (var redisClient = new RedisClient(TestConfig.SingleHost))
+            {
+                for (var i = 0; i < noOfConcurrentClients; i++)
+                {
+                    var clientNo = i;
+                    var action = (Action)(() => UseClientAsync(redisClient, clientNo));
+#if NETCORE
+                    tasks.Add(Task.Run(action));
+#else                                       
+                    clientAsyncResults.Add(action.BeginInvoke(null, null));
+#endif
+                }
+            }
+#if NETCORE
+            Task.WaitAll(tasks.ToArray());
+#else            
+            WaitHandle.WaitAll(clientAsyncResults.ConvertAll(x => x.AsyncWaitHandle).ToArray());
+#endif
+            Debug.WriteLine(String.Format("Time Taken: {0}", (Stopwatch.GetTimestamp() - before) / 1000));
+        }
 
-			WaitHandle.WaitAll(clientAsyncResults.ConvertAll(x => x.AsyncWaitHandle).ToArray());
+        [Test]
+        public void Can_support_64_threads_using_the_client_sequentially()
+        {
+            var before = Stopwatch.GetTimestamp();
 
-			Debug.WriteLine(String.Format("Time Taken: {0}", (Stopwatch.GetTimestamp() - before) / 1000));
-		}
+            const int noOfConcurrentClients = 64; //WaitHandle.WaitAll limit is <= 64
 
-		[Test]
-		public void Can_support_64_threads_using_the_client_sequentially()
-		{
-			var before = Stopwatch.GetTimestamp();
+            using (var redisClient = new RedisClient(TestConfig.SingleHost))
+            {
+                for (var i = 0; i < noOfConcurrentClients; i++)
+                {
+                    var clientNo = i;
+                    UseClient(redisClient, clientNo);
+                }
+            }
 
-			const int noOfConcurrentClients = 64; //WaitHandle.WaitAll limit is <= 64
+            Debug.WriteLine(String.Format("Time Taken: {0}", (Stopwatch.GetTimestamp() - before) / 1000));
+        }
 
-			using (var redisClient = new RedisClient(TestConfig.SingleHost))
-			{
-				for (var i = 0; i < noOfConcurrentClients; i++)
-				{
-					var clientNo = i;
-					UseClient(redisClient, clientNo);
-				}
-			}
+        private void UseClientAsync(RedisClient client, int clientNo)
+        {
+            lock (this)
+            {
+                UseClient(client, clientNo);
+            }
+        }
 
-			Debug.WriteLine(String.Format("Time Taken: {0}", (Stopwatch.GetTimestamp() - before) / 1000));
-		}
+        private static void UseClient(RedisClient client, int clientNo)
+        {
+            var host = "";
 
-		private void UseClientAsync(RedisClient client, int clientNo)
-		{
-			lock (this)
-			{
-				UseClient(client, clientNo);
-			}
-		}
+            try
+            {
+                host = client.Host;
 
-		private static void UseClient(RedisClient client, int clientNo)
-		{
-			var host = "";
+                Log("Client '{0}' is using '{1}'", clientNo, client.Host);
 
-			try
-			{
-				host = client.Host;
+                var testClientKey = "test:" + host + ":" + clientNo;
+                client.SetValue(testClientKey, testData);
+                var result = client.GetValue(testClientKey) ?? "";
 
-				Log("Client '{0}' is using '{1}'", clientNo, client.Host);
+                Log("\t{0} => {1} len {2} {3} len", testClientKey,
+                    testData.Length, testData.Length == result.Length ? "==" : "!=", result.Length);
 
-				var testClientKey = "test:" + host + ":" + clientNo;
-				client.SetEntry(testClientKey, testData);
-				var result = client.GetValue(testClientKey) ?? "";
+            }
+            catch (NullReferenceException ex)
+            {
+                Debug.WriteLine("NullReferenceException StackTrace: \n" + ex.StackTrace);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(String.Format("\t[ERROR@{0}]: {1} => {2}",
+                    host, ex.GetType().Name, ex.Message));
+            }
+        }
 
-				Log("\t{0} => {1} len {2} {3} len", testClientKey,
-					testData.Length, testData.Length == result.Length ? "==" : "!=", result.Length);
-
-			}
-			catch (NullReferenceException ex)
-			{
-				Debug.WriteLine("NullReferenceException StackTrace: \n" + ex.StackTrace);
-			}
-			catch (Exception ex)
-			{
-				Debug.WriteLine(String.Format("\t[ERROR@{0}]: {1} => {2}",
-					host, ex.GetType().Name, ex.Message));
-			}
-		}
-
-	}
+    }
 }

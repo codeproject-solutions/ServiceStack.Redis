@@ -12,19 +12,26 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using ServiceStack.Logging;
+using ServiceStack.Text;
 
 namespace ServiceStack.Redis
 {
     /// <summary>
-    /// Provides thread-safe retrievel of redis clients since each client is a new one.
+    /// Provides thread-safe retrieval of redis clients since each client is a new one.
     /// Allows the configuration of different ReadWrite and ReadOnly hosts
     /// </summary>
     public partial class BasicRedisClientManager
-        : IRedisClientsManager, IRedisFailover
+        : IRedisClientsManager, IRedisFailover, IHasRedisResolver
     {
-        private List<RedisEndpoint> ReadWriteHosts { get; set; }
-        private List<RedisEndpoint> ReadOnlyHosts { get; set; }
+        public static ILog Log = LogManager.GetLogger(typeof(BasicRedisClientManager));
+        
         public int? ConnectTimeout { get; set; }
+        public int? SocketSendTimeout { get; set; }
+        public int? SocketReceiveTimeout { get; set; }
+        public int? IdleTimeOutSecs { get; set; }
 
         /// <summary>
         /// Gets or sets object key prefix.
@@ -33,15 +40,19 @@ namespace ServiceStack.Redis
         private int readWriteHostsIndex;
         private int readOnlyHostsIndex;
 
-        public IRedisClientFactory RedisClientFactory { get; set; }
+        protected int RedisClientCounter = 0;
 
-        public long Db { get; private set; }
+        public Func<RedisEndpoint, RedisClient> ClientFactory { get; set; } 
+
+        public long? Db { get; private set; }
 
         public Action<IRedisNativeClient> ConnectionFilter { get; set; }
 
         public List<Action<IRedisClientsManager>> OnFailover { get; private set; }
 
-        public BasicRedisClientManager() : this(RedisNativeClient.DefaultHost) { }
+        public IRedisResolver RedisResolver { get; set; }
+
+        public BasicRedisClientManager() : this(RedisConfig.DefaultHost) { }
 
         public BasicRedisClientManager(params string[] readWriteHosts)
             : this(readWriteHosts, readWriteHosts) { }
@@ -56,25 +67,25 @@ namespace ServiceStack.Redis
         /// </summary>
         /// <param name="readWriteHosts">The write hosts.</param>
         /// <param name="readOnlyHosts">The read hosts.</param>
-        public BasicRedisClientManager(
-            IEnumerable<string> readWriteHosts,
-            IEnumerable<string> readOnlyHosts)
-            : this(readWriteHosts, readOnlyHosts, RedisNativeClient.DefaultDb)
-        {
-        }
-
+        /// <param name="initalDb"></param>
         public BasicRedisClientManager(
             IEnumerable<string> readWriteHosts,
             IEnumerable<string> readOnlyHosts,
-            long initalDb)
+            long? initalDb = null)
+            : this(readWriteHosts.ToRedisEndPoints(), readOnlyHosts.ToRedisEndPoints(), initalDb) {}
+
+        public BasicRedisClientManager(
+            IEnumerable<RedisEndpoint> readWriteHosts,
+            IEnumerable<RedisEndpoint> readOnlyHosts,
+            long? initalDb = null)
         {
             this.Db = initalDb;
 
-            ReadWriteHosts = readWriteHosts.ToRedisEndPoints();
-            ReadOnlyHosts = readOnlyHosts.ToRedisEndPoints();
+            RedisResolver = new RedisResolver(readWriteHosts, readOnlyHosts);
 
             this.OnFailover = new List<Action<IRedisClientsManager>>();
-            this.RedisClientFactory = Redis.RedisClientFactory.Instance;
+
+            JsConfig.InitStatics();
 
             this.OnStart();
         }
@@ -90,27 +101,7 @@ namespace ServiceStack.Redis
         /// <returns></returns>
         public IRedisClient GetClient()
         {
-            var nextHost = ReadWriteHosts[readWriteHostsIndex++ % ReadWriteHosts.Count];
-            var client = RedisClientFactory.CreateRedisClient(
-                nextHost.Host, nextHost.Port);
-
-            if (this.ConnectTimeout != null)
-            {
-                client.ConnectTimeout = this.ConnectTimeout.Value;
-            }
-
-            //Set database to userSpecified if different
-            if (Db != RedisNativeClient.DefaultDb)
-            {
-                client.ChangeDb(Db);
-            }
-
-            if (nextHost.RequiresAuth)
-                client.Password = nextHost.Password;
-
-            client.NamespacePrefix = NamespacePrefix;
-            client.ConnectionFilter = ConnectionFilter;
-
+            var client = InitNewClient(RedisResolver.CreateMasterClient(readWriteHostsIndex++));
             return client;
         }
 
@@ -120,26 +111,26 @@ namespace ServiceStack.Redis
         /// <returns></returns>
         public virtual IRedisClient GetReadOnlyClient()
         {
-            var nextHost = ReadOnlyHosts[readOnlyHostsIndex++ % ReadOnlyHosts.Count];
-            var client = RedisClientFactory.CreateRedisClient(
-                nextHost.Host, nextHost.Port);
+            var client = InitNewClient(RedisResolver.CreateSlaveClient(readOnlyHostsIndex++));
+            return client;
+        }
 
-            if (this.ConnectTimeout != null)
-            {
-                client.ConnectTimeout = this.ConnectTimeout.Value;
-            }
-
-            //Set database to userSpecified if different
-            if (Db != RedisNativeClient.DefaultDb)
-            {
-                client.ChangeDb(Db);
-            }
-
-            if (nextHost.RequiresAuth)
-                client.Password = nextHost.Password;
-
-            client.NamespacePrefix = NamespacePrefix;
+        private RedisClient InitNewClient(RedisClient client)
+        {
+            client.Id = Interlocked.Increment(ref RedisClientCounter);
             client.ConnectionFilter = ConnectionFilter;
+            if (this.ConnectTimeout != null)
+                client.ConnectTimeout = this.ConnectTimeout.Value;
+            if (this.SocketSendTimeout.HasValue)
+                client.SendTimeout = this.SocketSendTimeout.Value;
+            if (this.SocketReceiveTimeout.HasValue)
+                client.ReceiveTimeout = this.SocketReceiveTimeout.Value;
+            if (this.IdleTimeOutSecs.HasValue)
+                client.IdleTimeOutSecs = this.IdleTimeOutSecs.Value;
+            if (this.NamespacePrefix != null)
+                client.NamespacePrefix = NamespacePrefix;
+            if (Db != null && client.Db != Db) //Reset database to default if changed
+                client.ChangeDb(Db.Value);
 
             return client;
         }
@@ -165,8 +156,18 @@ namespace ServiceStack.Redis
 
         public void FailoverTo(IEnumerable<string> readWriteHosts, IEnumerable<string> readOnlyHosts)
         {
-            ReadWriteHosts = readWriteHosts.ToRedisEndPoints();
-            ReadOnlyHosts = readOnlyHosts.ToRedisEndPoints();
+            Interlocked.Increment(ref RedisState.TotalFailovers);
+
+            var masters = readWriteHosts.ToList();
+            var replicas = readOnlyHosts.ToList();
+
+            Log.Info($"FailoverTo: {string.Join(",", masters)} : {string.Join(",", replicas)} Total: {RedisState.TotalFailovers}");
+            
+            lock (this)
+            {
+                RedisResolver.ResetMasters(masters);
+                RedisResolver.ResetSlaves(replicas);
+            }
 
             Start();
         }

@@ -13,8 +13,11 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using ServiceStack.Model;
+using ServiceStack.Text;
 
 namespace ServiceStack.Redis
 {
@@ -22,45 +25,95 @@ namespace ServiceStack.Redis
     {
         public static List<RedisEndpoint> ToRedisEndPoints(this IEnumerable<string> hosts)
         {
-            if (hosts == null) return new List<RedisEndpoint>();
-
-            var redisEndpoints = new List<RedisEndpoint>();
-            foreach (var host in hosts)
-            {
-                RedisEndpoint endpoint;
-                string[] hostParts;
-                if (host.Contains("@"))
-                {
-                    hostParts = host.SplitOnLast('@');
-                    var password = hostParts[0];
-                    hostParts = hostParts[1].Split(':');
-                    endpoint = GetRedisEndPoint(hostParts);
-                    endpoint.Password = password;
-                }
-                else
-                {
-                    hostParts = host.Split(':');
-                    endpoint = GetRedisEndPoint(hostParts);
-                }
-                redisEndpoints.Add(endpoint);
-            }
-            return redisEndpoints;
+            return hosts == null
+                ? new List<RedisEndpoint>()
+                : hosts.Select(x => ToRedisEndpoint(x)).ToList();
         }
 
-        private static RedisEndpoint GetRedisEndPoint(string[] hostParts)
+        public static RedisEndpoint ToRedisEndpoint(this string connectionString, int? defaultPort = null)
         {
-            const int hostOrIpAddressIndex = 0;
-            const int portIndex = 1;
+            if (connectionString == null)
+                throw new ArgumentNullException("connectionString");
+            if (connectionString.StartsWith("redis://"))
+                connectionString = connectionString.Substring("redis://".Length);
 
-            if (hostParts.Length == 0)
-                throw new ArgumentException("'{0}' is not a valid Host or IP Address: e.g. '127.0.0.0[:11211]'");
+            var domainParts = connectionString.SplitOnLast('@');
+            var qsParts = domainParts.Last().SplitOnFirst('?');
+            var hostParts = qsParts[0].SplitOnLast(':');
+            var useDefaultPort = true;
+            var port = defaultPort.GetValueOrDefault(RedisConfig.DefaultPort);
+            if (hostParts.Length > 1)
+            {
+                port = int.Parse(hostParts[1]);
+                useDefaultPort = false;
+            }
+            var endpoint = new RedisEndpoint(hostParts[0], port);
+            if (domainParts.Length > 1)
+            {
+                var authParts = domainParts[0].SplitOnFirst(':');
+                if (authParts.Length > 1)
+                    endpoint.Client = authParts[0];
 
-            var port = (hostParts.Length == 1)
-                           ? RedisNativeClient.DefaultPort
-                           : Int32.Parse(hostParts[portIndex]);
+                endpoint.Password = authParts.Last();
+            }
 
-            return new RedisEndpoint(hostParts[hostOrIpAddressIndex], port);
-        }        
+            if (qsParts.Length > 1)
+            {
+                var qsParams = qsParts[1].Split('&');
+                foreach (var param in qsParams)
+                {
+                    var entry = param.Split('=');
+                    var value = entry.Length > 1 ? entry[1].UrlDecode() : null;
+                    if (value == null) continue;
+
+                    var name = entry[0].ToLower();
+                    switch (name)
+                    {
+                        case "db":
+                            endpoint.Db = int.Parse(value);
+                            break;
+                        case "ssl":
+                            endpoint.Ssl = bool.Parse(value);
+                            if (useDefaultPort)
+                                endpoint.Port = RedisConfig.DefaultPortSsl;
+                            break;
+                        case "sslprotocols":
+                            SslProtocols protocols;
+                            value = value?.Replace("|", ",");
+                            if (!Enum.TryParse(value, true, out protocols)) throw new ArgumentOutOfRangeException("Keyword '" + name + "' requires an SslProtocol value (multiple values separated by '|').");
+                            endpoint.SslProtocols = protocols;
+                            break;
+                        case "client":
+                            endpoint.Client = value;
+                            break;
+                        case "password":
+                            endpoint.Password = value;
+                            break;
+                        case "namespaceprefix":
+                            endpoint.NamespacePrefix = value;
+                            break;
+                        case "connecttimeout":
+                            endpoint.ConnectTimeout = int.Parse(value);
+                            break;
+                        case "sendtimeout":
+                            endpoint.SendTimeout = int.Parse(value);
+                            break;
+                        case "receivetimeout":
+                            endpoint.ReceiveTimeout = int.Parse(value);
+                            break;
+                        case "retrytimeout":
+                            endpoint.RetryTimeout = int.Parse(value);
+                            break;
+                        case "idletimeout":
+                        case "idletimeoutsecs":
+                            endpoint.IdleTimeOutSecs = int.Parse(value);
+                            break;
+                    }
+                }
+            }
+
+            return endpoint;
+        }
     }
 
     internal static class RedisExtensionsInternal
@@ -101,6 +154,35 @@ namespace ServiceStack.Redis
             return results;
         }
 
+        public static string[] ToStringArray(this byte[][] multiDataList)
+        {
+            if (multiDataList == null)
+                return TypeConstants.EmptyStringArray;
+
+            var to = new string[multiDataList.Length];
+            for (int i = 0; i < multiDataList.Length; i++)
+            {
+                to[i] = multiDataList[i].FromUtf8Bytes();
+            }
+            return to;
+        }
+
+        public static Dictionary<string, string> ToStringDictionary(this byte[][] multiDataList)
+        {
+            if (multiDataList == null)
+                return TypeConstants.EmptyStringDictionary;
+
+            var map = new Dictionary<string, string>();
+
+            for (var i = 0; i < multiDataList.Length; i += 2)
+            {
+                var key = multiDataList[i].FromUtf8Bytes();
+                map[key] = multiDataList[i + 1].FromUtf8Bytes();
+            }
+
+            return map;
+        }
+
         private static readonly NumberFormatInfo DoubleFormatProvider = new NumberFormatInfo
         {
             PositiveInfinitySymbol = "+inf",
@@ -116,20 +198,20 @@ namespace ServiceStack.Redis
         {
             var bytes = new byte[strVal.Length];
             for (var i = 0; i < strVal.Length; i++)
-                bytes[i] = (byte) strVal[i];
+                bytes[i] = (byte)strVal[i];
 
             return bytes;
         }
 
-		public static byte[][] ToMultiByteArray(this string[] args)
-    	{
-    		var byteArgs = new byte[args.Length][];
-    		for (var i = 0; i < args.Length; ++i)
-    			byteArgs[i] = args[i].ToUtf8Bytes();
-    		return byteArgs;
-    	}
+        public static byte[][] ToMultiByteArray(this string[] args)
+        {
+            var byteArgs = new byte[args.Length][];
+            for (var i = 0; i < args.Length; ++i)
+                byteArgs[i] = args[i].ToUtf8Bytes();
+            return byteArgs;
+        }
 
-        public static  byte[][] PrependByteArray(this byte[][] args, byte[] valueToPrepend)
+        public static byte[][] PrependByteArray(this byte[][] args, byte[] valueToPrepend)
         {
             var newArgs = new byte[args.Length + 1][];
             newArgs[0] = valueToPrepend;
@@ -139,7 +221,7 @@ namespace ServiceStack.Redis
 
             return newArgs;
         }
-        public static  byte[][] PrependInt(this byte[][] args, int valueToPrepend)
+        public static byte[][] PrependInt(this byte[][] args, int valueToPrepend)
         {
             return args.PrependByteArray(valueToPrepend.ToUtf8Bytes());
         }
